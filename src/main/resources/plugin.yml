@@ -1,0 +1,25 @@
+name: OrderSystem
+main: com.example.ordersystem.OrderSystemPlugin
+version: 1.0.0
+api-version: '1.21'
+softdepend: [Vault]
+commands:
+  orders:
+    description: Open the order board or manage orders.
+    usage: /orders [create|collect|trust]
+permissions:
+  ordersystem.create:
+    description: Allows creating buy orders.
+    default: true
+  ordersystem.maxorders.1:
+    description: Allows 1 active order.
+    default: true
+  ordersystem.staff.cancel:
+    description: Allows staff to cancel orders.
+    default: op
+  ordersystem.staff.edit:
+    description: Allows staff to edit orders.
+    default: op
+  ordersystem.collect.trusted:
+    description: Allows collecting as a trusted player.
+    default: true
