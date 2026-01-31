@@ -9,13 +9,14 @@ public class OrderCreationSession {
     public enum Step {
         MATERIAL,
         QUANTITY,
-        PRICE
+        TOTAL_PRICE
     }
 
     private Step step = Step.MATERIAL;
     private Material material;
     private long quantity;
     private double pricePerItem;
+    private double totalPrice;
 
     public Step getStep() {
         return step;
@@ -47,5 +48,13 @@ public class OrderCreationSession {
 
     public void setPricePerItem(double pricePerItem) {
         this.pricePerItem = pricePerItem;
+    }
+
+    public double getTotalPrice() {
+        return totalPrice;
+    }
+
+    public void setTotalPrice(double totalPrice) {
+        this.totalPrice = totalPrice;
     }
 }

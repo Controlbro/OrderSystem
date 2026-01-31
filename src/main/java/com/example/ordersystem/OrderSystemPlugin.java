@@ -28,6 +28,7 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
     private StorageManager storageManager;
     private GUIManager guiManager;
     private final Map<UUID, OrderCreationSession> creationSessions = new HashMap<>();
+    private final Map<UUID, SearchSession> searchSessions = new HashMap<>();
 
     @Override
     public void onEnable() {
@@ -44,6 +45,9 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(guiManager, this);
         Bukkit.getPluginManager().registerEvents(this, this);
         getCommand("orders").setExecutor(this);
+        if (getCommand("order") != null) {
+            getCommand("order").setExecutor(this);
+        }
 
         Bukkit.getScheduler().runTaskTimer(this, () -> {
             orderManager.removeExpiredOrders();
@@ -72,15 +76,41 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
     public void onChat(AsyncPlayerChatEvent event) {
         Player player = event.getPlayer();
         OrderCreationSession session = creationSessions.get(player.getUniqueId());
-        if (session == null) {
+        SearchSession searchSession = searchSessions.get(player.getUniqueId());
+        if (session == null && searchSession == null) {
             return;
         }
         event.setCancelled(true);
-        Bukkit.getScheduler().runTask(this, () -> handleChatInput(player, session, event.getMessage()));
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (session != null) {
+                handleChatInput(player, session, event.getMessage());
+            } else if (searchSession != null) {
+                handleSearchInput(player, searchSession, event.getMessage());
+            }
+        });
     }
 
     private void handleChatInput(Player player, OrderCreationSession session, String message) {
         try {
+            if (session.getStep() == OrderCreationSession.Step.MATERIAL) {
+                if (message.equalsIgnoreCase("gui")) {
+                    guiManager.openMaterialSelector(player, false);
+                    return;
+                }
+                Material material = guiManager.findClosestMaterial(message);
+                if (material == null) {
+                    player.sendMessage(ChatColor.RED + "No matching material found. Type 'gui' to browse.");
+                    return;
+                }
+                if (!guiManager.isExactMaterialMatch(message, material)) {
+                    player.sendMessage(ChatColor.YELLOW + "Auto-filled to: " + guiManager.formatMaterialName(material));
+                }
+                session.setMaterial(material);
+                session.setStep(OrderCreationSession.Step.QUANTITY);
+                player.sendMessage(ChatColor.YELLOW + "Selected material: " + guiManager.formatMaterialName(material));
+                player.sendMessage(ChatColor.GRAY + "Enter quantity in chat.");
+                return;
+            }
             if (session.getStep() == OrderCreationSession.Step.QUANTITY) {
                 long quantity = Long.parseLong(message);
                 if (quantity <= 0) {
@@ -88,23 +118,53 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
                     return;
                 }
                 session.setQuantity(quantity);
-                session.setStep(OrderCreationSession.Step.PRICE);
-                player.sendMessage(ChatColor.GRAY + "Enter price per item in chat.");
+                session.setStep(OrderCreationSession.Step.TOTAL_PRICE);
+                player.sendMessage(ChatColor.GRAY + "Enter the total price you're paying in chat.");
                 return;
             }
-            if (session.getStep() == OrderCreationSession.Step.PRICE) {
-                double price = Double.parseDouble(message);
-                if (price <= 0) {
+            if (session.getStep() == OrderCreationSession.Step.TOTAL_PRICE) {
+                double totalPrice = Double.parseDouble(message);
+                if (totalPrice <= 0) {
                     player.sendMessage(ChatColor.RED + "Price must be positive.");
                     return;
                 }
-                session.setPricePerItem(price);
+                double pricePerItem = totalPrice / session.getQuantity();
+                session.setTotalPrice(totalPrice);
+                session.setPricePerItem(pricePerItem);
                 double listingFee = getConfig().getDouble("listing-fee", 1000D);
                 guiManager.openConfirmCreation(player, session, listingFee);
             }
         } catch (NumberFormatException ex) {
             player.sendMessage(ChatColor.RED + "Invalid number.");
         }
+    }
+
+    private void handleSearchInput(Player player, SearchSession session, String message) {
+        if (message.equalsIgnoreCase("gui")) {
+            guiManager.openMaterialSelector(player, true);
+            return;
+        }
+        Material material = guiManager.findClosestMaterial(message);
+        if (material == null) {
+            player.sendMessage(ChatColor.RED + "No matching material found. Type 'gui' to browse.");
+            return;
+        }
+        if (!guiManager.isExactMaterialMatch(message, material)) {
+            player.sendMessage(ChatColor.YELLOW + "Auto-filled to: " + guiManager.formatMaterialName(material));
+        }
+        guiManager.openOrderBoard(player, 1, material, session.ownerFilter());
+        searchSessions.remove(player.getUniqueId());
+    }
+
+    public void beginSearch(Player player, UUID ownerFilter) {
+        searchSessions.put(player.getUniqueId(), new SearchSession(ownerFilter));
+        player.closeInventory();
+        player.sendMessage(ChatColor.GRAY + "Type a material name to search, or 'gui' to browse.");
+    }
+
+    public Optional<UUID> consumeSearchOwnerFilter(Player player) {
+        SearchSession session = searchSessions.remove(player.getUniqueId());
+        return session == null ? Optional.empty() : Optional.ofNullable(session.ownerFilter());
     }
 
     public void confirmCreate(Player player) {
@@ -125,7 +185,7 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
             player.closeInventory();
             return;
         }
-        double escrow = session.getQuantity() * session.getPricePerItem();
+        double escrow = session.getTotalPrice();
         double listingFee = getConfig().getDouble("listing-fee", 1000D);
         double total = escrow + listingFee;
         if (!economy.has(player, total)) {
@@ -181,7 +241,7 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
         }
         if (args[0].equalsIgnoreCase("create")) {
             creationSessions.put(player.getUniqueId(), new OrderCreationSession());
-            guiManager.openMaterialSelector(player, false);
+            player.sendMessage(ChatColor.GRAY + "Type a material name to create an order, or 'gui' to browse.");
             return true;
         }
         if (args[0].equalsIgnoreCase("collect")) {
@@ -232,5 +292,8 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
         }
         player.sendMessage(ChatColor.RED + "Unknown subcommand.");
         return true;
+    }
+
+    private record SearchSession(UUID ownerFilter) {
     }
 }
