@@ -7,6 +7,9 @@ commands:
   orders:
     description: Open the order board or manage orders.
     usage: /orders [create|collect|trust]
+  order:
+    description: Alias for /orders.
+    usage: /order [create|collect|trust]
 permissions:
   ordersystem.create:
     description: Allows creating buy orders.

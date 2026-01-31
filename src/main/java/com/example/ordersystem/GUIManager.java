@@ -14,7 +14,9 @@ import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.BlockStateMeta;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.block.ShulkerBox;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -23,17 +25,23 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.HashSet;
 
 /**
  * Manages all GUI interactions for orders.
  */
 public class GUIManager implements Listener {
     private static final int PAGE_SIZE = 45;
+    private static final int DELIVERY_SIZE = 54;
+    private static final int DELIVERY_CONTENTS_END = 45;
     private final OrderSystemPlugin plugin;
     private final OrderManager orderManager;
     private final Economy economy;
     private final Map<UUID, BoardSession> boardSessions = new HashMap<>();
+    private final Map<Integer, UUID> deliveryLocks = new HashMap<>();
+    private final Set<UUID> deliveryClosing = new HashSet<>();
     private final List<Material> selectableMaterials = new ArrayList<>();
 
     public GUIManager(OrderSystemPlugin plugin, OrderManager orderManager, Economy economy) {
@@ -124,26 +132,30 @@ public class GUIManager implements Listener {
         player.openInventory(inventory);
     }
 
-    public void openDeliveryConfirm(Player player, Order order) {
-        Inventory inventory = Bukkit.createInventory(new DeliveryConfirmHolder(order.getId()), 27, "Confirm Delivery");
+    public void openDeliveryInventory(Player player, Order order) {
+        if (order.getStatus() != OrderStatus.ACTIVE) {
+            player.sendMessage(ChatColor.RED + "Order is no longer active.");
+            return;
+        }
+        UUID current = deliveryLocks.get(order.getId());
+        if (current != null && !current.equals(player.getUniqueId())) {
+            player.sendMessage(ChatColor.RED + "Someone else is already delivering to this order.");
+            return;
+        }
+        deliveryLocks.put(order.getId(), player.getUniqueId());
+        Inventory inventory = Bukkit.createInventory(new DeliveryHolder(order.getId()), DELIVERY_SIZE,
+                "Deliver Items \u2192 Order #" + order.getId());
         ItemStack filler = createButton(Material.GRAY_STAINED_GLASS_PANE, " ");
-        for (int i = 0; i < 9; i++) {
+        for (int i = DELIVERY_CONTENTS_END; i < DELIVERY_SIZE; i++) {
             inventory.setItem(i, filler);
         }
-        ItemStack preview = new ItemStack(order.getMaterial());
-        ItemMeta previewMeta = preview.getItemMeta();
-        previewMeta.setDisplayName(ChatColor.YELLOW + formatMaterialName(order.getMaterial()));
-        preview.setItemMeta(previewMeta);
-        inventory.setItem(4, preview);
-
-        long deliverable = getDeliverableAmount(player, order);
-        double payout = deliverable * order.getPricePerItem();
-        ItemStack confirm = createButton(Material.GREEN_STAINED_GLASS_PANE,
-                ChatColor.GREEN + "CONFIRM",
-                ChatColor.GRAY + "Click to deliver items (" + ChatColor.GREEN + "$" + NumberFormatter.formatCompact(payout) + ChatColor.GRAY + ")");
-        ItemStack cancel = createButton(Material.RED_STAINED_GLASS_PANE, ChatColor.RED + "CANCEL");
-        inventory.setItem(11, confirm);
-        inventory.setItem(15, cancel);
+        ItemStack info = createButton(Material.PAPER,
+                ChatColor.YELLOW + "Deliver " + formatMaterialName(order.getMaterial()),
+                ChatColor.GRAY + "Remaining: " + NumberFormatter.formatCompact(order.getRemainingQuantity()),
+                ChatColor.GRAY + "Price per item: $" + NumberFormatter.formatCompact(order.getPricePerItem()));
+        inventory.setItem(47, info);
+        inventory.setItem(45, createButton(Material.RED_STAINED_GLASS_PANE, ChatColor.RED + "Cancel"));
+        inventory.setItem(53, createButton(Material.GREEN_STAINED_GLASS_PANE, ChatColor.GREEN + "Deliver Items"));
         player.openInventory(inventory);
     }
 
@@ -172,9 +184,9 @@ public class GUIManager implements Listener {
         meta.setDisplayName(ChatColor.YELLOW + formatMaterialName(session.getMaterial()));
         List<String> lore = new ArrayList<>();
         lore.add(ChatColor.GRAY + "Quantity: " + NumberFormatter.formatCompact(session.getQuantity()));
-        lore.add(ChatColor.GRAY + "Price: $" + NumberFormatter.formatCompact(session.getPricePerItem()));
-        double escrow = session.getQuantity() * session.getPricePerItem();
-        lore.add(ChatColor.GRAY + "Total Escrow: $" + NumberFormatter.formatCompact(escrow));
+        lore.add(ChatColor.GRAY + "Total Price: $" + NumberFormatter.formatCompact(session.getTotalPrice()));
+        lore.add(ChatColor.GRAY + "Price per item: $" + NumberFormatter.formatCompact(session.getPricePerItem()));
+        lore.add(ChatColor.GRAY + "Total Escrow: $" + NumberFormatter.formatCompact(session.getTotalPrice()));
         lore.add(ChatColor.GRAY + "Listing Fee: $" + NumberFormatter.formatCompact(listingFee));
         meta.setLore(lore);
         item.setItemMeta(meta);
@@ -196,9 +208,8 @@ public class GUIManager implements Listener {
         } else if (holder instanceof MaterialSelectorHolder selector) {
             event.setCancelled(true);
             handleMaterialSelector(player, event.getCurrentItem(), selector, event.getSlot());
-        } else if (holder instanceof DeliveryConfirmHolder confirmHolder) {
-            event.setCancelled(true);
-            handleDeliveryConfirm(player, confirmHolder, event.getSlot());
+        } else if (holder instanceof DeliveryHolder deliveryHolder) {
+            handleDeliveryClick(player, deliveryHolder, event);
         } else if (holder instanceof CollectHolder collectHolder) {
             event.setCancelled(true);
             handleCollectClick(player, collectHolder, event.getSlot(), event.getClick());
@@ -210,8 +221,18 @@ public class GUIManager implements Listener {
 
     @EventHandler
     public void onInventoryClose(InventoryCloseEvent event) {
-        if (event.getInventory().getHolder() instanceof OrderBoardHolder) {
+        InventoryHolder holder = event.getInventory().getHolder();
+        if (holder instanceof OrderBoardHolder) {
             boardSessions.remove(event.getPlayer().getUniqueId());
+            return;
+        }
+        if (holder instanceof DeliveryHolder deliveryHolder && event.getPlayer() instanceof Player player) {
+            if (deliveryClosing.remove(player.getUniqueId())) {
+                releaseDeliveryLock(deliveryHolder.orderId());
+                return;
+            }
+            returnDeliveryItems(player, collectInventoryItems(event.getInventory()));
+            releaseDeliveryLock(deliveryHolder.orderId());
         }
     }
 
@@ -228,7 +249,7 @@ public class GUIManager implements Listener {
             if (clickType == ClickType.RIGHT && session.filter() != null) {
                 openOrderBoard(player, 1, null, session.ownerFilter());
             } else {
-                openMaterialSelector(player, true);
+                plugin.beginSearch(player, session.ownerFilter());
             }
             return;
         }
@@ -237,7 +258,11 @@ public class GUIManager implements Listener {
             return;
         }
         if (slot == 50) {
-            openOrderBoard(player, 1, session.filter(), player.getUniqueId());
+            if (session.ownerFilter() != null && session.ownerFilter().equals(player.getUniqueId())) {
+                openOrderBoard(player, 1, session.filter(), null);
+            } else {
+                openOrderBoard(player, 1, session.filter(), player.getUniqueId());
+            }
             return;
         }
         if (slot == 53) {
@@ -247,7 +272,7 @@ public class GUIManager implements Listener {
         int index = slot;
         if (index >= 0 && index < session.orderIds().size()) {
             int orderId = session.orderIds().get(index);
-            orderManager.getOrder(orderId).ifPresent(order -> openDeliveryConfirm(player, order));
+            orderManager.getOrder(orderId).ifPresent(order -> openDeliveryInventory(player, order));
         }
     }
 
@@ -265,7 +290,8 @@ public class GUIManager implements Listener {
         }
         Material material = clicked.getType();
         if (holder.forSearch()) {
-            openOrderBoard(player, 1, material);
+            Optional<UUID> ownerFilter = plugin.consumeSearchOwnerFilter(player);
+            openOrderBoard(player, 1, material, ownerFilter.orElse(null));
         } else {
             plugin.setSelectedMaterial(player, material);
             player.closeInventory();
@@ -274,33 +300,51 @@ public class GUIManager implements Listener {
         }
     }
 
-    private void handleDeliveryConfirm(Player player, DeliveryConfirmHolder holder, int slot) {
+    private void handleDeliveryClick(Player player, DeliveryHolder holder, InventoryClickEvent event) {
+        int slot = event.getSlot();
+        if (slot >= DELIVERY_CONTENTS_END) {
+            event.setCancelled(true);
+            if (slot == 45) {
+                player.closeInventory();
+            } else if (slot == 53) {
+                handleDeliverySubmit(player, holder, event.getInventory());
+            }
+            return;
+        }
+    }
+
+    private void handleDeliverySubmit(Player player, DeliveryHolder holder, Inventory inventory) {
         Optional<Order> optionalOrder = orderManager.getOrder(holder.orderId());
         if (optionalOrder.isEmpty()) {
             player.closeInventory();
             return;
         }
         Order order = optionalOrder.get();
-        if (slot == 11) {
-            long deliverable = getDeliverableAmount(player, order);
-            if (deliverable <= 0) {
-                player.sendMessage(ChatColor.RED + "You have no items to deliver.");
-                player.closeInventory();
-                return;
-            }
-            OrderManager.DeliveryResult result = orderManager.deliverFromPlayer(player, order, economy);
-            if (result.isSuccess()) {
-                plugin.getStorageManager().requestSaveAsync(orderManager);
-                player.sendMessage(ChatColor.GREEN + "You delivered " + NumberFormatter.formatCompact(result.getAmountDelivered()) + " "
-                        + formatMaterialName(order.getMaterial()) + " and received $" + NumberFormatter.formatCompact(result.getPayout()));
-                player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1F, 1F);
-            } else {
-                player.sendMessage(ChatColor.RED + result.getMessage());
-            }
+        if (order.getStatus() != OrderStatus.ACTIVE) {
+            player.sendMessage(ChatColor.RED + "Order is no longer active.");
+            returnDeliveryItems(player, collectInventoryItems(inventory));
             player.closeInventory();
-        } else if (slot == 15) {
-            player.closeInventory();
+            return;
         }
+        DeliveryExtraction extraction = extractDeliverables(inventory, order.getMaterial(), order.getRemainingQuantity());
+        if (extraction.amountDelivered() <= 0) {
+            player.sendMessage(ChatColor.RED + "You have no items to deliver.");
+            returnDeliveryItems(player, collectInventoryItems(inventory));
+            player.closeInventory();
+            return;
+        }
+        OrderManager.DeliveryResult result = orderManager.deliverItems(player, order, extraction.amountDelivered(), economy);
+        if (result.isSuccess()) {
+            plugin.getStorageManager().requestSaveAsync(orderManager);
+            player.sendMessage(ChatColor.GREEN + "You delivered " + NumberFormatter.formatCompact(result.getAmountDelivered()) + " "
+                    + formatMaterialName(order.getMaterial()) + " and received $" + NumberFormatter.formatCompact(result.getPayout()));
+            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1F, 1F);
+        } else {
+            player.sendMessage(ChatColor.RED + result.getMessage());
+        }
+        deliveryClosing.add(player.getUniqueId());
+        returnDeliveryItems(player, extraction.leftovers());
+        player.closeInventory();
     }
 
     private void handleCollectClick(Player player, CollectHolder holder, int slot, ClickType clickType) {
@@ -371,16 +415,6 @@ public class GUIManager implements Listener {
         openCollectGUI(player, order, page);
     }
 
-    private long getDeliverableAmount(Player player, Order order) {
-        long count = 0;
-        for (ItemStack stack : player.getInventory().getContents()) {
-            if (stack != null && stack.getType() == order.getMaterial()) {
-                count += stack.getAmount();
-            }
-        }
-        return Math.min(count, order.getRemainingQuantity());
-    }
-
     private long calculateStoredAmount(Order order) {
         long total = 0;
         for (ItemStack stack : order.getStoredItems()) {
@@ -418,8 +452,155 @@ public class GUIManager implements Listener {
         return item;
     }
 
-    private String formatMaterialName(Material material) {
+    public String formatMaterialName(Material material) {
         return material.name().toLowerCase().replace('_', ' ');
+    }
+
+    public Material findClosestMaterial(String input) {
+        if (input == null || input.isBlank()) {
+            return null;
+        }
+        String normalized = normalize(input);
+        Material best = null;
+        int bestDistance = Integer.MAX_VALUE;
+        for (Material material : selectableMaterials) {
+            String candidate = normalize(material.name());
+            if (candidate.equals(normalized)) {
+                return material;
+            }
+            if (candidate.contains(normalized)) {
+                return material;
+            }
+            int distance = levenshteinDistance(normalized, candidate);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = material;
+            }
+        }
+        return best;
+    }
+
+    public boolean isExactMaterialMatch(String input, Material material) {
+        if (input == null || material == null) {
+            return false;
+        }
+        return normalize(input).equals(normalize(material.name()));
+    }
+
+    private String normalize(String value) {
+        return value.toLowerCase().replace("_", "").replace(" ", "");
+    }
+
+    private int levenshteinDistance(String a, String b) {
+        int[] costs = new int[b.length() + 1];
+        for (int j = 0; j < costs.length; j++) {
+            costs[j] = j;
+        }
+        for (int i = 1; i <= a.length(); i++) {
+            costs[0] = i;
+            int nw = i - 1;
+            for (int j = 1; j <= b.length(); j++) {
+                int cj = Math.min(1 + Math.min(costs[j], costs[j - 1]),
+                        a.charAt(i - 1) == b.charAt(j - 1) ? nw : nw + 1);
+                nw = costs[j];
+                costs[j] = cj;
+            }
+        }
+        return costs[b.length()];
+    }
+
+    private DeliveryExtraction extractDeliverables(Inventory inventory, Material material, long limit) {
+        List<ItemStack> leftovers = new ArrayList<>();
+        long delivered = 0;
+        for (int i = 0; i < DELIVERY_CONTENTS_END; i++) {
+            ItemStack stack = inventory.getItem(i);
+            if (stack == null || stack.getType() == Material.AIR) {
+                continue;
+            }
+            if (isShulkerBox(stack.getType())) {
+                DeliveryExtraction shulkerExtraction = extractFromShulker(stack, material, limit - delivered);
+                delivered += shulkerExtraction.amountDelivered();
+                leftovers.addAll(shulkerExtraction.leftovers());
+            } else if (stack.getType() == material) {
+                int remove = (int) Math.min(stack.getAmount(), Math.max(0, limit - delivered));
+                int remaining = stack.getAmount() - remove;
+                delivered += remove;
+                if (remaining > 0) {
+                    leftovers.add(new ItemStack(material, remaining));
+                }
+            } else {
+                leftovers.add(stack);
+            }
+        }
+        for (int i = 0; i < DELIVERY_CONTENTS_END; i++) {
+            inventory.setItem(i, null);
+        }
+        return new DeliveryExtraction(delivered, leftovers);
+    }
+
+    private DeliveryExtraction extractFromShulker(ItemStack shulkerStack, Material material, long limit) {
+        ItemStack updatedShulker = shulkerStack.clone();
+        ItemMeta meta = updatedShulker.getItemMeta();
+        if (!(meta instanceof BlockStateMeta blockStateMeta)) {
+            return new DeliveryExtraction(0L, List.of(updatedShulker));
+        }
+        if (!(blockStateMeta.getBlockState() instanceof ShulkerBox shulkerBox)) {
+            return new DeliveryExtraction(0L, List.of(updatedShulker));
+        }
+        ItemStack[] contents = shulkerBox.getInventory().getContents();
+        long delivered = 0;
+        for (int i = 0; i < contents.length; i++) {
+            ItemStack content = contents[i];
+            if (content == null || content.getType() != material) {
+                continue;
+            }
+            int remove = (int) Math.min(content.getAmount(), Math.max(0, limit - delivered));
+            int remaining = content.getAmount() - remove;
+            delivered += remove;
+            if (remaining <= 0) {
+                contents[i] = null;
+            } else {
+                content.setAmount(remaining);
+            }
+            if (delivered >= limit) {
+                break;
+            }
+        }
+        shulkerBox.getInventory().setContents(contents);
+        blockStateMeta.setBlockState(shulkerBox);
+        updatedShulker.setItemMeta(blockStateMeta);
+        return new DeliveryExtraction(delivered, List.of(updatedShulker));
+    }
+
+    private boolean isShulkerBox(Material material) {
+        return material.name().endsWith("SHULKER_BOX");
+    }
+
+    private List<ItemStack> collectInventoryItems(Inventory inventory) {
+        List<ItemStack> items = new ArrayList<>();
+        for (int i = 0; i < DELIVERY_CONTENTS_END; i++) {
+            ItemStack stack = inventory.getItem(i);
+            if (stack != null && stack.getType() != Material.AIR) {
+                items.add(stack);
+            }
+            inventory.setItem(i, null);
+        }
+        return items;
+    }
+
+    private void returnDeliveryItems(Player player, List<ItemStack> items) {
+        for (ItemStack stack : items) {
+            Map<Integer, ItemStack> remaining = player.getInventory().addItem(stack);
+            if (!remaining.isEmpty()) {
+                for (ItemStack leftover : remaining.values()) {
+                    player.getWorld().dropItemNaturally(player.getLocation(), leftover);
+                }
+            }
+        }
+    }
+
+    private void releaseDeliveryLock(int orderId) {
+        deliveryLocks.remove(orderId);
     }
 
     private record BoardSession(int page, Material filter, UUID ownerFilter, List<Integer> orderIds) {
@@ -439,7 +620,7 @@ public class GUIManager implements Listener {
         }
     }
 
-    private record DeliveryConfirmHolder(int orderId) implements InventoryHolder {
+    private record DeliveryHolder(int orderId) implements InventoryHolder {
         @Override
         public Inventory getInventory() {
             return null;
@@ -458,5 +639,8 @@ public class GUIManager implements Listener {
         public Inventory getInventory() {
             return null;
         }
+    }
+
+    private record DeliveryExtraction(long amountDelivered, List<ItemStack> leftovers) {
     }
 }
