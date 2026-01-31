@@ -6,6 +6,7 @@ import org.bukkit.ChatColor;
 import org.bukkit.Material;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -18,11 +19,12 @@ import java.util.Map;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * Main plugin entry point for OrderSystem.
  */
-public class OrderSystemPlugin extends JavaPlugin implements Listener {
+public class OrderSystemPlugin extends JavaPlugin implements Listener, TabCompleter {
     private Economy economy;
     private OrderManager orderManager;
     private StorageManager storageManager;
@@ -45,8 +47,10 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(guiManager, this);
         Bukkit.getPluginManager().registerEvents(this, this);
         getCommand("orders").setExecutor(this);
+        getCommand("orders").setTabCompleter(this);
         if (getCommand("order") != null) {
             getCommand("order").setExecutor(this);
+            getCommand("order").setTabCompleter(this);
         }
 
         Bukkit.getScheduler().runTaskTimer(this, () -> {
@@ -91,19 +95,22 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
     }
 
     private void handleChatInput(Player player, OrderCreationSession session, String message) {
+        if (message.equalsIgnoreCase("cancel")) {
+            cancelCreate(player);
+            return;
+        }
         try {
             if (session.getStep() == OrderCreationSession.Step.MATERIAL) {
                 if (message.equalsIgnoreCase("gui")) {
                     guiManager.openMaterialSelector(player, false);
                     return;
                 }
-                Material material = guiManager.findClosestMaterial(message);
+                Material material = guiManager.findExactMaterial(message);
                 if (material == null) {
-                    player.sendMessage(ChatColor.RED + "No matching material found. Type 'gui' to browse.");
+                    player.sendMessage(ChatColor.RED + "No exact material found.");
+                    sendMaterialSuggestions(player, message);
+                    player.sendMessage(ChatColor.GRAY + "Type another material name, 'gui' to browse, or 'cancel' to stop.");
                     return;
-                }
-                if (!guiManager.isExactMaterialMatch(message, material)) {
-                    player.sendMessage(ChatColor.YELLOW + "Auto-filled to: " + guiManager.formatMaterialName(material));
                 }
                 session.setMaterial(material);
                 session.setStep(OrderCreationSession.Step.QUANTITY);
@@ -140,17 +147,21 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
     }
 
     private void handleSearchInput(Player player, SearchSession session, String message) {
+        if (message.equalsIgnoreCase("cancel")) {
+            searchSessions.remove(player.getUniqueId());
+            player.sendMessage(ChatColor.RED + "Search cancelled.");
+            return;
+        }
         if (message.equalsIgnoreCase("gui")) {
             guiManager.openMaterialSelector(player, true);
             return;
         }
-        Material material = guiManager.findClosestMaterial(message);
+        Material material = guiManager.findExactMaterial(message);
         if (material == null) {
-            player.sendMessage(ChatColor.RED + "No matching material found. Type 'gui' to browse.");
+            player.sendMessage(ChatColor.RED + "No exact material found.");
+            sendMaterialSuggestions(player, message);
+            player.sendMessage(ChatColor.GRAY + "Type another material name, 'gui' to browse, or 'cancel' to stop.");
             return;
-        }
-        if (!guiManager.isExactMaterialMatch(message, material)) {
-            player.sendMessage(ChatColor.YELLOW + "Auto-filled to: " + guiManager.formatMaterialName(material));
         }
         guiManager.openOrderBoard(player, 1, material, session.ownerFilter());
         searchSessions.remove(player.getUniqueId());
@@ -160,6 +171,7 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
         searchSessions.put(player.getUniqueId(), new SearchSession(ownerFilter));
         player.closeInventory();
         player.sendMessage(ChatColor.GRAY + "Type a material name to search, or 'gui' to browse.");
+        player.sendMessage(ChatColor.GRAY + "Type 'cancel' to stop.");
     }
 
     public Optional<UUID> consumeSearchOwnerFilter(Player player) {
@@ -242,6 +254,7 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
         if (args[0].equalsIgnoreCase("create")) {
             creationSessions.put(player.getUniqueId(), new OrderCreationSession());
             player.sendMessage(ChatColor.GRAY + "Type a material name to create an order, or 'gui' to browse.");
+            player.sendMessage(ChatColor.GRAY + "Type 'cancel' to stop.");
             return true;
         }
         if (args[0].equalsIgnoreCase("collect")) {
@@ -292,6 +305,33 @@ public class OrderSystemPlugin extends JavaPlugin implements Listener {
         }
         player.sendMessage(ChatColor.RED + "Unknown subcommand.");
         return true;
+    }
+
+    @Override
+    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        if (args.length == 1) {
+            return List.of("create", "collect", "trust").stream()
+                    .filter(option -> option.startsWith(args[0].toLowerCase()))
+                    .toList();
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("trust")) {
+            return Bukkit.getOnlinePlayers().stream()
+                    .map(Player::getName)
+                    .filter(name -> name.toLowerCase().startsWith(args[1].toLowerCase()))
+                    .sorted()
+                    .toList();
+        }
+        return List.of();
+    }
+
+    private void sendMaterialSuggestions(Player player, String input) {
+        List<Material> suggestions = guiManager.suggestMaterials(input, 5);
+        if (!suggestions.isEmpty()) {
+            String suggestionList = suggestions.stream()
+                    .map(guiManager::formatMaterialName)
+                    .collect(Collectors.joining(", "));
+            player.sendMessage(ChatColor.YELLOW + "Did you mean: " + suggestionList + "?");
+        }
     }
 
     private record SearchSession(UUID ownerFilter) {

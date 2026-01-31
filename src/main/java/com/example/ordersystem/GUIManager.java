@@ -204,18 +204,26 @@ public class GUIManager implements Listener {
         InventoryHolder holder = event.getInventory().getHolder();
         if (holder instanceof OrderBoardHolder) {
             event.setCancelled(true);
-            handleOrderBoardClick(player, event.getSlot(), event.getClick());
+            if (event.getRawSlot() < event.getInventory().getSize()) {
+                handleOrderBoardClick(player, event.getRawSlot(), event.getClick());
+            }
         } else if (holder instanceof MaterialSelectorHolder selector) {
             event.setCancelled(true);
-            handleMaterialSelector(player, event.getCurrentItem(), selector, event.getSlot());
+            if (event.getRawSlot() < event.getInventory().getSize()) {
+                handleMaterialSelector(player, event.getCurrentItem(), selector, event.getRawSlot());
+            }
         } else if (holder instanceof DeliveryHolder deliveryHolder) {
             handleDeliveryClick(player, deliveryHolder, event);
         } else if (holder instanceof CollectHolder collectHolder) {
             event.setCancelled(true);
-            handleCollectClick(player, collectHolder, event.getSlot(), event.getClick());
+            if (event.getRawSlot() < event.getInventory().getSize()) {
+                handleCollectClick(player, collectHolder, event.getRawSlot(), event.getClick());
+            }
         } else if (holder instanceof ConfirmCreateHolder) {
             event.setCancelled(true);
-            handleConfirmCreateClick(player, event.getSlot());
+            if (event.getRawSlot() < event.getInventory().getSize()) {
+                handleConfirmCreateClick(player, event.getRawSlot());
+            }
         }
     }
 
@@ -456,6 +464,19 @@ public class GUIManager implements Listener {
         return material.name().toLowerCase().replace('_', ' ');
     }
 
+    public Material findExactMaterial(String input) {
+        if (input == null || input.isBlank()) {
+            return null;
+        }
+        String normalized = normalize(input);
+        for (Material material : selectableMaterials) {
+            if (normalize(material.name()).equals(normalized)) {
+                return material;
+            }
+        }
+        return null;
+    }
+
     public Material findClosestMaterial(String input) {
         if (input == null || input.isBlank()) {
             return null;
@@ -478,6 +499,39 @@ public class GUIManager implements Listener {
             }
         }
         return best;
+    }
+
+    public List<Material> suggestMaterials(String input, int limit) {
+        if (input == null || input.isBlank() || limit <= 0) {
+            return List.of();
+        }
+        String normalized = normalize(input);
+        List<MaterialSuggestion> suggestions = new ArrayList<>();
+        for (Material material : selectableMaterials) {
+            String candidate = normalize(material.name());
+            int score;
+            if (candidate.contains(normalized) || normalized.contains(candidate)) {
+                score = 0;
+            } else {
+                score = levenshteinDistance(normalized, candidate);
+            }
+            suggestions.add(new MaterialSuggestion(material, score));
+        }
+        suggestions.sort((a, b) -> {
+            int scoreComparison = Integer.compare(a.score(), b.score());
+            if (scoreComparison != 0) {
+                return scoreComparison;
+            }
+            return a.material().name().compareTo(b.material().name());
+        });
+        List<Material> result = new ArrayList<>();
+        for (MaterialSuggestion suggestion : suggestions) {
+            if (result.size() >= limit) {
+                break;
+            }
+            result.add(suggestion.material());
+        }
+        return result;
     }
 
     public boolean isExactMaterialMatch(String input, Material material) {
@@ -642,5 +696,8 @@ public class GUIManager implements Listener {
     }
 
     private record DeliveryExtraction(long amountDelivered, List<ItemStack> leftovers) {
+    }
+
+    private record MaterialSuggestion(Material material, int score) {
     }
 }
